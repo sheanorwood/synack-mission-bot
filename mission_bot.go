@@ -10,6 +10,7 @@ import (
     "log"
     "net/http"
     "os"
+    "strconv"
     "strings"
     "sync"
     "time"
@@ -43,7 +44,6 @@ func init() {
         fmt.Fprintf(os.Stderr, `
 Usage of %s:
   -t <token>     Provide your session token (JWT) for authentication with the Synack platform.
-                 This token is used for polling tasks/targets and claiming missions.
 
 Description:
   This program periodically polls the Synack platform for two things:
@@ -51,15 +51,17 @@ Description:
     1. Available missions (tasks):
        - If a mission can be claimed, the script claims it.
        - Upon a successful claim, a notification is printed to stdout.
+       - Waits 5 seconds between each claimed task, and 30 seconds between entire polling cycles.
 
     2. Unregistered targets:
        - Any newly discovered unregistered targets are automatically signed up for.
+       - Waits 5 minutes (300 seconds) between each unregistered target check.
 
   If the session token expires (HTTP 401), the script prompts you to enter a new token
   interactively and then continues operating with the refreshed token.
 
 Example:
-  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE" | notify -silent
+  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE"
 
 Flags:
 `, os.Args[0])
@@ -67,7 +69,7 @@ Flags:
     }
 }
 
-// getTasks retrieves tasks from Synack.
+// getTasks retrieves tasks from Synack (mirroring the Python code’s behavior).
 func getTasks(token string) ([]Task, error) {
     client := globalHTTPClient()
     url := "https://platform.synack.com/api/tasks/v2/tasks"
@@ -96,22 +98,41 @@ func getTasks(token string) ([]Task, error) {
     }
     defer resp.Body.Close()
 
-    if resp.StatusCode == http.StatusOK {
+    switch resp.StatusCode {
+    case http.StatusOK:
         var tasks []Task
         if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
             return nil, err
         }
         return tasks, nil
-    }
 
-    if resp.StatusCode == http.StatusUnauthorized {
+    case http.StatusUnauthorized:
         return nil, fmt.Errorf("unauthorized (401)")
-    }
 
-    return nil, fmt.Errorf("failed to retrieve tasks, status code: %d", resp.StatusCode)
+    case 429:
+        // If we hit a 429, we can implement a simple backoff or check Retry-After
+        retryAfter := resp.Header.Get("Retry-After")
+        if retryAfter == "" {
+            fmt.Println("Got 429 Too Many Requests. Sleeping 30 seconds.")
+            time.Sleep(30 * time.Second)
+        } else {
+            if secs, err := strconv.Atoi(retryAfter); err == nil {
+                fmt.Printf("Got 429 Too Many Requests, waiting %d seconds...\n", secs)
+                time.Sleep(time.Duration(secs) * time.Second)
+            } else {
+                // Fallback if parsing fails
+                time.Sleep(30 * time.Second)
+            }
+        }
+        // Retry once after waiting
+        return getTasks(token)
+
+    default:
+        return nil, fmt.Errorf("failed to retrieve tasks, status code: %d", resp.StatusCode)
+    }
 }
 
-// postClaimTask attempts to claim a specific task.
+// postClaimTask attempts to claim a specific task (mirroring the Python code’s behavior).
 func postClaimTask(token string, task Task) error {
     client := globalHTTPClient()
     url := fmt.Sprintf(
@@ -146,11 +167,12 @@ func postClaimTask(token string, task Task) error {
     }
 }
 
-// pollUnregisteredTargets polls for unregistered targets every 5 minutes and signs up for new ones.
+// pollUnregisteredTargets polls for unregistered targets every 5 minutes (300s) and signs up for new ones.
 func pollUnregisteredTargets(token string, knownSlugs *sync.Map, tokenChan chan string) {
     for {
         select {
         case newToken := <-tokenChan:
+            // If we get a new token, update local copy
             token = newToken
         default:
             // continue using current token
@@ -168,6 +190,7 @@ func pollUnregisteredTargets(token string, knownSlugs *sync.Map, tokenChan chan 
         } else {
             for _, t := range targets {
                 if _, loaded := knownSlugs.LoadOrStore(t.Slug, true); !loaded {
+                    // Found a new slug, sign up
                     err := signupTarget(token, t.Slug)
                     if err != nil {
                         log.Println(err)
@@ -176,7 +199,7 @@ func pollUnregisteredTargets(token string, knownSlugs *sync.Map, tokenChan chan 
             }
         }
 
-        // Poll every 5 minutes
+        // Sleep 5 minutes (300 seconds) before checking again
         time.Sleep(5 * time.Minute)
     }
 }
@@ -199,19 +222,23 @@ func getUnregisteredTargets(token string) ([]Target, error) {
     }
     defer resp.Body.Close()
 
-    if resp.StatusCode == http.StatusOK {
+    switch resp.StatusCode {
+    case http.StatusOK:
         var targets []Target
         if err := json.NewDecoder(resp.Body).Decode(&targets); err != nil {
             return nil, err
         }
         return targets, nil
-    }
-
-    if resp.StatusCode == http.StatusUnauthorized {
+    case http.StatusUnauthorized:
         return nil, fmt.Errorf("unauthorized (401)")
+    case 429:
+        fmt.Println("Got 429 Too Many Requests on targets. Sleeping 30 seconds.")
+        time.Sleep(30 * time.Second)
+        // Retry once after waiting
+        return getUnregisteredTargets(token)
+    default:
+        return nil, fmt.Errorf("failed to retrieve unregistered targets, status code: %d", resp.StatusCode)
     }
-
-    return nil, fmt.Errorf("failed to retrieve unregistered targets, status code: %d", resp.StatusCode)
 }
 
 // signupTarget attempts to sign up for a target using its slug.
@@ -236,6 +263,13 @@ func signupTarget(token, slug string) error {
     if resp.StatusCode == http.StatusOK {
         fmt.Printf("Signed up for target %s successfully.\n", slug)
         return nil
+    } else if resp.StatusCode == http.StatusUnauthorized {
+        return fmt.Errorf("unauthorized (401)")
+    } else if resp.StatusCode == 429 {
+        fmt.Println("Got 429 Too Many Requests on signup. Sleeping 30 seconds.")
+        time.Sleep(30 * time.Second)
+        // Retry once
+        return signupTarget(token, slug)
     }
 
     return fmt.Errorf("failed to sign up for target %s, status code: %d", slug, resp.StatusCode)
@@ -249,7 +283,7 @@ func refreshToken() string {
     return strings.TrimSpace(newToken)
 }
 
-// mainLoop continuously polls tasks and attempts to claim them.
+// mainLoop continuously polls tasks, attempts to claim them, and matches the Python timing.
 func mainLoop(token string, tokenChan chan string) {
     for {
         select {
@@ -269,6 +303,7 @@ func mainLoop(token string, tokenChan chan string) {
             }
             log.Println(err)
         } else {
+            // Same logic as Python: For each task claimed, sleep 5 seconds
             for _, task := range tasks {
                 if err := postClaimTask(token, task); err != nil {
                     if strings.Contains(err.Error(), "401") {
@@ -283,18 +318,18 @@ func mainLoop(token string, tokenChan chan string) {
                     }
                     log.Println(err)
                 } else {
-                    // If claim was successful, wait 5 seconds before next claim
+                    // Successfully claimed => sleep 5s, just like Python
                     time.Sleep(5 * time.Second)
                 }
             }
         }
-        // Sleep 30s before polling for tasks again
+
+        // After processing tasks, sleep 30s (same as Python)
         time.Sleep(30 * time.Second)
     }
 }
 
 func main() {
-    // Use the -t flag to match your Python usage (e.g., -t "sessiontoken").
     tokenFlag := flag.String("t", "", "Session token for authentication")
     flag.Parse()
 
@@ -310,7 +345,7 @@ func main() {
     // Channel to communicate token updates between goroutines
     tokenChan := make(chan string)
 
-    // Start polling unregistered targets in a separate goroutine
+    // Start polling unregistered targets (every 5 mins)
     go pollUnregisteredTargets(token, knownSlugs, tokenChan)
 
     // Start the main loop to poll tasks and claim them
