@@ -156,7 +156,7 @@ func postClaimTask(token string, task Task) error {
 
     switch resp.StatusCode {
     case http.StatusCreated:
-        fmt.Println("Mission claimed successfully. (Notification here!)")
+        fmt.Println("Mission claimed successfully.")
         return nil
     case http.StatusPreconditionFailed:
         return fmt.Errorf("mission cannot be claimed anymore (412)")
