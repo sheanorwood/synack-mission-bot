@@ -21,20 +21,12 @@
   
 ## Steps
 
-1. Build the binary with a custom output name:
-```go build -o mission_bot mission_bot.go```
-
-2. Move it into a folder on your PATH. A common choice is /usr/local/bin.
-```sudo mv mission_bot /usr/local/bin/```
-
-3. Verify permissions (optional). By default, it should be executable, but you can ensure it with:
-```sudo chmod +x /usr/local/bin/mission_bot```
-
-4. Run the program
-```mission_bot -t "YOUR_SESSION_TOKEN_HERE"```
-
-5. Install with Go
+1. Install with Go
 ```go install github.com/sheanorwood/synack-mission-bot```
+
+2. Run the program {-v for verbose output}
+```synack-mission-bot -t "YOUR_SESSION_TOKEN_HERE" -v```
+
 
 Usage of mission_bot:
   -t <token>     Provide your session token (JWT) for authentication with the Synack platform.
@@ -46,5 +38,6 @@ Usage of mission_bot:
   interactively and then continues operating with the refreshed token.
 
 Example:
-  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE" | notify -silent
-   mission_bot -t "YOUR_SESSION_TOKEN_HERE" | notify -silent # if in path
+
+synack-mission-bot -t "YOUR_SESSION_TOKEN_HERE" | notify -silent
+

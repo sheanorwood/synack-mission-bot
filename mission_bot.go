@@ -65,7 +65,7 @@ Description:
          signed up for.
 
 Example:
-  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE" -v
+  synack-mission-bot -t "YOUR_SESSION_TOKEN_HERE" -v
 
 Flags:
 `, os.Args[0])
@@ -73,7 +73,7 @@ Flags:
     }
 }
 
-// getTasks retrieves tasks from Synack (mirroring the Python code’s behavior).
+// getTasks retrieves tasks from Synack.
 func getTasks(token string) ([]Task, error) {
     client := globalHTTPClient()
 
@@ -161,13 +161,13 @@ func postClaimTask(token string, task Task) error {
         fmt.Println("Mission claimed successfully.")
         return nil
     case http.StatusPreconditionFailed:
-        return fmt.Errorf("mission cannot be claimed anymore (412)")
+        return fmt.Errorf("Mission cannot be claimed anymore (412)")
     case http.StatusUnauthorized:
-        return fmt.Errorf("unauthorized (401)")
+        return fmt.Errorf("Unauthorized (401)")
     case http.StatusForbidden:
-        return fmt.Errorf("failed to claim task, status code: 403")
+        return fmt.Errorf("Failed to claim task, status code: 403")
     default:
-        return fmt.Errorf("failed to claim task, status code: %d", resp.StatusCode)
+        return fmt.Errorf("Failed to claim task, status code: %d", resp.StatusCode)
     }
 }
 
