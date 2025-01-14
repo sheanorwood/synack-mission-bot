@@ -6,6 +6,7 @@
   1. Available missions (tasks):
        - If a mission can be claimed, the script claims it.
        - Upon a successful claim, a notification is printed to stdout.
+       - The bot will stop after 5 consecutive 403 responses from the server. Usually, once all missions can be claimed for your level.
     
   2. 2. Unregistered targets:
        - Any newly discovered unregistered targets are automatically signed up for.
@@ -32,10 +33,14 @@
 4. Run the program
 ```mission_bot -t "YOUR_SESSION_TOKEN_HERE"```
 
-```
+5. Install with Go
+```go install github.com/sheanorwood/synack-mission-bot```
+
 Usage of mission_bot:
   -t <token>     Provide your session token (JWT) for authentication with the Synack platform.
                  This token is used for polling tasks/targets and claiming missions.
+
+  -v            Enable verbose logging to STDOUT
 
  If the session token expires (HTTP 401), the script prompts you to enter a new token
   interactively and then continues operating with the refreshed token.
