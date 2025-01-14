@@ -22,15 +22,20 @@ type Task struct {
     CampaignUid     string `json:"campaignUid"`
     ListingUid      string `json:"listingUid"`
     OrganizationUid string `json:"organizationUid"`
+    // Optionally, if the API returns a payout or similar, you could add:
+    // Payout          float64 `json:"payout"`
 }
 
-// Target represents the JSON structure for unregistered targets returned by Synack.
+// Target represents the JSON structure for unregistered targets.
 type Target struct {
     Slug string `json:"slug"`
 }
 
-// globalHTTPClient returns an HTTP client with InsecureSkipVerify for demonstration.
-// In production, please handle certificates properly.
+// tasksEndpoint is the default endpoint for retrieving tasks.
+var tasksEndpoint = "https://platform.synack.com/api/tasks/v2/tasks"
+
+// globalHTTPClient returns an HTTP client with InsecureSkipVerify (for demo).
+// In production, handle certificates properly.
 func globalHTTPClient() *http.Client {
     tr := &http.Transport{
         TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -43,25 +48,24 @@ func init() {
     flag.Usage = func() {
         fmt.Fprintf(os.Stderr, `
 Usage of %s:
-  -t <token>     Provide your session token (JWT) for authentication with the Synack platform.
+  -t <token>    Provide your session token (JWT) for authentication with the Synack platform.
+  -v            Enable verbose logging.
 
 Description:
   This program periodically polls the Synack platform for two things:
 
     1. Available missions (tasks):
        - If a mission can be claimed, the script claims it.
-       - Upon a successful claim, a notification is printed to stdout.
-       - Waits 5 seconds between each claimed task, and 30 seconds between entire polling cycles.
+       - If 403 is received 5 times in a row while claiming tasks, it gracefully stops.
+       - If 401 (unauthorized) is encountered, it prompts for a new token.
+       - Waits 5 seconds between each claimed task, and 30 seconds between polling cycles.
 
     2. Unregistered targets:
-       - Any newly discovered unregistered targets are automatically signed up for.
-       - Waits 5 minutes (300 seconds) between each unregistered target check.
-
-  If the session token expires (HTTP 401), the script prompts you to enter a new token
-  interactively and then continues operating with the refreshed token.
+       - Checks every 5 minutes. Any newly discovered unregistered targets are automatically
+         signed up for.
 
 Example:
-  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE"
+  ./mission_bot -t "YOUR_SESSION_TOKEN_HERE" -v
 
 Flags:
 `, os.Args[0])
@@ -72,9 +76,8 @@ Flags:
 // getTasks retrieves tasks from Synack (mirroring the Python code’s behavior).
 func getTasks(token string) ([]Task, error) {
     client := globalHTTPClient()
-    url := "https://platform.synack.com/api/tasks/v2/tasks"
 
-    req, err := http.NewRequest("GET", url, nil)
+    req, err := http.NewRequest("GET", tasksEndpoint, nil)
     if err != nil {
         return nil, err
     }
@@ -110,7 +113,7 @@ func getTasks(token string) ([]Task, error) {
         return nil, fmt.Errorf("unauthorized (401)")
 
     case 429:
-        // If we hit a 429, we can implement a simple backoff or check Retry-After
+        // If we hit a 429, implement a simple backoff or check Retry-After
         retryAfter := resp.Header.Get("Retry-After")
         if retryAfter == "" {
             fmt.Println("Got 429 Too Many Requests. Sleeping 30 seconds.")
@@ -120,7 +123,6 @@ func getTasks(token string) ([]Task, error) {
                 fmt.Printf("Got 429 Too Many Requests, waiting %d seconds...\n", secs)
                 time.Sleep(time.Duration(secs) * time.Second)
             } else {
-                // Fallback if parsing fails
                 time.Sleep(30 * time.Second)
             }
         }
@@ -132,7 +134,7 @@ func getTasks(token string) ([]Task, error) {
     }
 }
 
-// postClaimTask attempts to claim a specific task (mirroring the Python code’s behavior).
+// postClaimTask attempts to claim a specific task.
 func postClaimTask(token string, task Task) error {
     client := globalHTTPClient()
     url := fmt.Sprintf(
@@ -162,20 +164,26 @@ func postClaimTask(token string, task Task) error {
         return fmt.Errorf("mission cannot be claimed anymore (412)")
     case http.StatusUnauthorized:
         return fmt.Errorf("unauthorized (401)")
+    case http.StatusForbidden:
+        return fmt.Errorf("failed to claim task, status code: 403")
     default:
         return fmt.Errorf("failed to claim task, status code: %d", resp.StatusCode)
     }
 }
 
-// pollUnregisteredTargets polls for unregistered targets every 5 minutes (300s) and signs up for new ones.
-func pollUnregisteredTargets(token string, knownSlugs *sync.Map, tokenChan chan string) {
+// pollUnregisteredTargets checks unregistered targets every 5 minutes and signs up for new ones.
+func pollUnregisteredTargets(token string, knownSlugs *sync.Map, tokenChan chan string, verbose bool) {
     for {
         select {
         case newToken := <-tokenChan:
-            // If we get a new token, update local copy
             token = newToken
         default:
             // continue using current token
+        }
+
+        // Verbose logging
+        if verbose {
+            log.Println("Checking for unregistered targets...")
         }
 
         targets, err := getUnregisteredTargets(token)
@@ -277,20 +285,27 @@ func signupTarget(token, slug string) error {
 
 // refreshToken prompts the user to enter a new token.
 func refreshToken() string {
-    fmt.Print("Token expired. Please enter a new token:\n> ")
+    fmt.Print("Token expired or invalid. Please enter a new token:\n> ")
     reader := bufio.NewReader(os.Stdin)
     newToken, _ := reader.ReadString('\n')
     return strings.TrimSpace(newToken)
 }
 
-// mainLoop continuously polls tasks, attempts to claim them, and matches the Python timing.
-func mainLoop(token string, tokenChan chan string) {
+// mainLoop continuously polls tasks, attempts to claim them, and gracefully stops
+// if 403 is encountered 5 times in a row. If verbose is set, it logs each check.
+func mainLoop(token string, tokenChan chan string, verbose bool) {
+    var consecutive403Count int
+
     for {
         select {
         case newToken := <-tokenChan:
             token = newToken
         default:
-            // no update
+            // no token update
+        }
+
+        if verbose {
+            log.Println("Checking for available missions...")
         }
 
         tasks, err := getTasks(token)
@@ -299,45 +314,59 @@ func mainLoop(token string, tokenChan chan string) {
                 newToken := refreshToken()
                 tokenChan <- newToken
                 token = newToken
+                consecutive403Count = 0
                 continue
             }
             log.Println(err)
         } else {
-            // Same logic as Python: For each task claimed, sleep 5 seconds
+            // Process tasks
             for _, task := range tasks {
-                if err := postClaimTask(token, task); err != nil {
-                    if strings.Contains(err.Error(), "401") {
+                err := postClaimTask(token, task)
+                if err != nil {
+                    // If it's a 403, increment counter
+                    if strings.Contains(err.Error(), "403") {
+                        consecutive403Count++
+                        log.Printf("Got 403. Current consecutive403Count = %d\n", consecutive403Count)
+                        if consecutive403Count >= 5 {
+                            log.Println("Received 403 five times in a row. Stopping the bot.")
+                            return // Graceful exit
+                        }
+                    } else if strings.Contains(err.Error(), "401") {
                         newToken := refreshToken()
                         tokenChan <- newToken
                         token = newToken
+                        consecutive403Count = 0
                         break
+                    } else {
+                        log.Println(err)
                     }
-                    if strings.Contains(err.Error(), "412") {
-                        log.Println("Mission cannot be claimed anymore.")
-                        break
-                    }
-                    log.Println(err)
                 } else {
-                    // Successfully claimed => sleep 5s, just like Python
+                    // Success, reset the 403 counter
+                    consecutive403Count = 0
+                    fmt.Printf("Claimed task %s successfully.\n", task.ID)
+                    // Sleep 5s per your existing logic
                     time.Sleep(5 * time.Second)
                 }
             }
         }
 
-        // After processing tasks, sleep 30s (same as Python)
+        // Sleep 30s between task polls
         time.Sleep(30 * time.Second)
     }
 }
 
 func main() {
     tokenFlag := flag.String("t", "", "Session token for authentication")
+    verboseFlag := flag.Bool("v", false, "Enable verbose logging")
     flag.Parse()
 
     if *tokenFlag == "" {
         flag.Usage()
         os.Exit(1)
     }
+
     token := *tokenFlag
+    verbose := *verboseFlag
 
     // Known slugs map to track which slugs have been processed
     knownSlugs := &sync.Map{}
@@ -345,9 +374,9 @@ func main() {
     // Channel to communicate token updates between goroutines
     tokenChan := make(chan string)
 
-    // Start polling unregistered targets (every 5 mins)
-    go pollUnregisteredTargets(token, knownSlugs, tokenChan)
+    // Start polling unregistered targets every 5 mins
+    go pollUnregisteredTargets(token, knownSlugs, tokenChan, verbose)
 
     // Start the main loop to poll tasks and claim them
-    mainLoop(token, tokenChan)
+    mainLoop(token, tokenChan, verbose)
 }
