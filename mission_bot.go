@@ -351,7 +351,7 @@ func mainLoop(token string, tokenChan chan string, verbose bool) {
         }
 
         // Sleep 30s between task polls
-        time.Sleep(30 * time.Second)
+        time.Sleep(15 * time.Second)
     }
 }
 
